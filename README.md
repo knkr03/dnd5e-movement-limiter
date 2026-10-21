@@ -19,7 +19,7 @@ The drag limit works by wrapping the callbacks registered on each token's `Mouse
 In Foundry's **Add-on Modules** tab choose **Install Module** and paste the manifest URL:
 
 ```
-https://github.com/YOUR-GITHUB-USERNAME/dnd5e-movement-limiter/releases/latest/download/module.json
+https://github.com/knkr03/dnd5e-movement-limiter/releases/latest/download/module.json
 ```
 
 Then enable the module in your world.
