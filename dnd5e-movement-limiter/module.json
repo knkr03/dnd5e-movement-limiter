@@ -1,0 +1,28 @@
+{
+  "id": "dnd5e-movement-limiter",
+  "title": "D&D 5e Movement Limiter & Undo",
+  "description": "Limits token drags to the actor's remaining D&D 5e movement for the selected movement action, allows extra movement allotments (Dash etc.) once movement is used up, and adds undo/redo move buttons to the Combat Tracker.",
+  "version": "1.0.0",
+  "compatibility": {
+    "minimum": "13",
+    "verified": "13.351"
+  },
+  "authors": [
+    { "name": "knkr03", "url": "https://github.com/knkr03" }
+  ],
+  "relationships": {
+    "systems": [
+      { "id": "dnd5e", "type": "system", "compatibility": { "minimum": "5.0.0" } }
+    ]
+  },
+  "esmodules": ["scripts/main.mjs"],
+  "styles": ["styles/move-limiter.css"],
+  "languages": [
+    { "lang": "en", "name": "English", "path": "languages/en.json" }
+  ],
+  "url": "https://github.com/knkr03/dnd5e-movement-limiter",
+  "manifest": "https://github.com/knkr03/dnd5e-movement-limiter/releases/latest/download/module.json",
+  "download": "https://github.com/knkr03/dnd5e-movement-limiter/releases/download/v1.0.0/module.zip",
+  "bugs": "https://github.com/knkr03/dnd5e-movement-limiter/issues",
+  "license": "LICENSE"
+}
