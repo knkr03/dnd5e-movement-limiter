@@ -41,6 +41,7 @@ export function registerSettings() {
   reg("measureFallback", { scope: "world", type: Boolean, default: true });
 
   reg("notify", { scope: "client", type: Boolean, default: true });
+  reg("shiftBypass", { scope: "client", type: Boolean, default: true });
   reg("showUndoButtons", {
     scope: "client", type: Boolean, default: true,
     onChange: () => game.modules.get(MODULE_ID)?.api?.refreshUndoButtons?.()

@@ -6,6 +6,14 @@
  * interactionData.destination to the token's remaining movement. Foundry's native drag
  * preview, collision and placement still run.
  *
+ * Holding Shift while dragging releases the constraint for the rest of that drag: the
+ * release latches until the token is placed, so letting go of Shift before the drop keeps
+ * the drag unconstrained. The next drag starts constrained again.
+ *
+ * The release is published so other modules that enforce their own movement budget (such
+ * as Knkr Pathing) can honour it: API#status reports an unlimited budget while released,
+ * and the `dnd5e-movement-limiter.constraintReleased` hook fires when it happens mid-drag.
+ *
  * Remaining movement is derived from Foundry's own TokenDocument#movementHistory, which
  * Foundry clears at the start of the token's turn and which shrinks when a movement is
  * reverted. There is no custom state to keep in sync.
@@ -18,6 +26,18 @@ const UNCONSTRAINED_ACTIONS = new Set(["blink", "displace"]);
 const EPSILON = 0.001;
 
 const managers = []; // { manager, callbacks, originals } for clean uninstall
+
+// Drags in progress that released the constraint, keyed by scene and token id. Other
+// modules that read the movement budget (such as Knkr Pathing) can consult this so the
+// release applies to them too, not just to this module's clamp.
+const releasedDrags = new Map();
+const dragKey = (doc) => `${doc?.parent?.id ?? ""}:${doc?.id ?? ""}`;
+
+/** Is the token's current drag released from the movement constraint? */
+export function isReleased(token) {
+  const key = dragKey(token?.document);
+  return !!key && releasedDrags.has(key);
+}
 
 // ------------------------------------------------------------------ units
 function sceneFeetFactor() {
@@ -138,9 +158,12 @@ function clampToBudget(origin, point, budget) {
   };
 }
 
+/** Shift is reported on the PIXI event or its native original. */
+const shiftHeld = (event) => !!event?.shiftKey || !!event?.originalEvent?.shiftKey;
+
 function applyClamp(event, drag) {
   const dest = event?.interactionData?.destination;
-  if (!dest || !drag) return null;
+  if (!dest || !drag?.budget || drag.bypassed) return null;
   const clamped = clampToBudget(drag.origin, dest, drag.budget.remaining);
   if (clamped.x !== dest.x || clamped.y !== dest.y) {
     dest.x = clamped.x;
@@ -156,7 +179,8 @@ export function installOnToken(token) {
   if (!callbacks || manager[INSTALLED]) return;
 
   const originals = {};
-  let drag = null;
+  let drag = null;      // state of the drag in progress
+  let stopKeys = null;  // Shift listener of the drag in progress
 
   const wrap = (name, fn) => {
     if (typeof callbacks[name] !== "function") return warn(`Missing interaction callback: ${name}`);
@@ -164,54 +188,104 @@ export function installOnToken(token) {
     callbacks[name] = function (event, ...args) { return fn(originals[name], this, event, args); };
   };
 
-  wrap("dragLeftStart", (orig, self, event, args) => {
+  /** Release the constraint for the rest of this drag; it stays released until placement. */
+  const markBypassed = (state, reason) => {
+    if (state.bypassed || !state.shiftEnabled) return;
+    state.bypassed = true;
+    releasedDrags.set(state.key, state);
+    log(`Constraint released for this drag (${reason}); stays released until the token is placed.`, { token: token.name });
+    try {
+      globalThis.Hooks?.callAll?.(`${MODULE_ID}.constraintReleased`, { token, document: token.document, scene: canvas.scene });
+    } catch (err) {
+      warn("Constraint release notification failed.", err);
+    }
+  };
+
+  /** A Shift press alone produces no drag event, so listen for the key as well. */
+  const trackShift = (state) => {
+    const onKey = (event) => { if (event?.key === "Shift" || event?.shiftKey) markBypassed(state, "Shift pressed"); };
+    window.addEventListener("keydown", onKey, true);
+    stopKeys = () => window.removeEventListener("keydown", onKey, true);
+  };
+
+  const endDrag = () => {
+    if (drag) releasedDrags.delete(drag.key);
+    stopKeys?.();
+    stopKeys = null;
     drag = null;
-    const bypass = game.user.isGM && setting("gmBypass");
+  };
+
+  wrap("dragLeftStart", (orig, self, event, args) => {
+    endDrag();
+    const state = {
+      key: dragKey(token.document),
+      origin: { x: token.center.x, y: token.center.y },
+      budget: null,
+      shiftEnabled: !!setting("shiftBypass"),
+      bypassed: false
+    };
+    drag = state;
+    trackShift(state);
+    if (shiftHeld(event)) markBypassed(state, "Shift held at drag start");
+
+    const bypass = state.bypassed || (game.user.isGM && setting("gmBypass"));
     if (!bypass && token.document.isOwner) {
       // Never let a failure here block Foundry's native drag initialization.
       try {
         const budget = budgetFor(token);
-        drag = { origin: { x: token.center.x, y: token.center.y }, budget };
+        state.budget = budget;
         log(`Drag start: ${token.name}`, {
           action: budget.action, mode: budget.mode, speed: budget.speed,
           spent: budget.spent, remaining: budget.remaining,
           moves: budget.moves, extraAllotments: budget.extras, newAllotment: budget.newAllotment
         });
       } catch (err) {
-        drag = null;
+        state.budget = null;
         warn("Budget calculation failed; drag left unconstrained.", err);
       }
+    } else if (state.bypassed) {
+      log(`Drag start without constraint: ${token.name}`);
     }
     return orig.call(self, event, ...args);
   });
 
   wrap("dragLeftMove", (orig, self, event, args) => {
+    if (drag && shiftHeld(event)) markBypassed(drag, "Shift held while dragging");
     applyClamp(event, drag);
     return orig.call(self, event, ...args);
   });
 
   wrap("dragLeftDrop", (orig, self, event, args) => {
+    const state = drag;
     let granted = null;
-    if (drag) {
-      const raw = { ...event.interactionData?.destination };
-      const clamped = applyClamp(event, drag);
-      if (clamped) {
-        const dist = measure(drag.origin, clamped);
-        log("Drop", { raw, clamped, distance: dist, remaining: drag.budget.remaining });
-        if (drag.budget.newAllotment && dist > EPSILON) granted = drag.budget.extras + 1;
+    try {
+      if (state && shiftHeld(event)) markBypassed(state, "Shift held at drop");
+      if (state && !state.bypassed && state.budget) {
+        const raw = { ...event.interactionData?.destination };
+        const clamped = applyClamp(event, state);
+        if (clamped) {
+          const dist = measure(state.origin, clamped);
+          log("Drop", { raw, clamped, distance: dist, remaining: state.budget.remaining });
+          if (state.budget.newAllotment && dist > EPSILON) granted = state.budget.extras + 1;
+        }
+      } else if (state?.bypassed) {
+        log(`Drop without constraint: ${token.name}`);
       }
+      return orig.call(self, event, ...args);
+    } finally {
+      if (granted && setting("notify")) {
+        ui.notifications.info(game.i18n.format("MOVELIMIT.ExtraGranted", { name: token.name, n: granted }));
+      }
+      endDrag();
     }
-    const result = orig.call(self, event, ...args);
-    if (granted && setting("notify")) {
-      ui.notifications.info(game.i18n.format("MOVELIMIT.ExtraGranted", { name: token.name, n: granted }));
-    }
-    drag = null;
-    return result;
   });
 
   wrap("dragLeftCancel", (orig, self, event, args) => {
-    drag = null;
-    return orig.call(self, event, ...args);
+    try {
+      return orig.call(self, event, ...args);
+    } finally {
+      endDrag();
+    }
   });
 
   manager[INSTALLED] = true;
@@ -223,6 +297,7 @@ export function installOnAllTokens() {
 }
 
 export function uninstallConstraint() {
+  releasedDrags.clear();
   for (const { manager, callbacks, originals } of managers) {
     for (const [name, fn] of Object.entries(originals)) callbacks[name] = fn;
     delete manager[INSTALLED];
@@ -237,7 +312,18 @@ export function registerConstraintHooks() {
 
 /** Public API pieces (exposed on game.modules.get(id).api). */
 export const constraintApi = {
-  status: (token) => (token ? budgetFor(token) : null),
+  /**
+   * Movement budget for a token. While a drag has released the constraint the budget is
+   * reported as released and unlimited, so other modules reading it for that drag do not
+   * enforce a limit the user just lifted. Read this at drag start to see a release that is
+   * already active; mid-drag changes are announced on the `constraintReleased` hook.
+   */
+  status: (token) => {
+    if (!token) return null;
+    if (isReleased(token)) return { ...budgetFor(token), released: true, remaining: Infinity };
+    return { ...budgetFor(token), released: false };
+  },
+  isReleased: (token) => isReleased(token),
   history: (token) => (token ? movementGroups(token.document) : null),
   resetTurn: (token) => token?.document?.clearMovementHistory?.()
 };

@@ -49,6 +49,10 @@
         "name": "Announce Extra Movement",
         "hint": "Show a notification when an extra movement allotment is granted."
       },
+      "shiftBypass": {
+        "name": "Shift Releases the Constraint",
+        "hint": "Hold Shift while dragging a token to move it without the movement limit. The release lasts until the token is placed, even if Shift is let go before the drop."
+      },
       "showUndoButtons": {
         "name": "Show Undo/Redo Move Buttons",
         "hint": "Show the move undo/redo buttons at the bottom of the Combat Tracker."
